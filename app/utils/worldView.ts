@@ -9,9 +9,10 @@ import { SQUARE_CORNERS, Terrain } from './terrain'
 //
 // Like the client, the scene is the 104x104 tiles around the zone from packet 73, and the camera
 // orbits the local player from packet 81. The ground comes from public/terrain and only locs with an
-// exported model (public/models/index.json) are drawn. The local player is drawn in its base pose
+// exported model (public/models/index.json) are drawn: walls, roofs and centrepieces, decorations
+// aren't yet. The local player is drawn in its base pose
 // with the look from public/models/players (RuneSource's default until packet 81's appearance is read).
-// Levels above the player's are hidden, like the client does indoors (roofs are not checked yet).
+// Levels above the player's are hidden when a roof is between the camera and the player (getTopLevel).
 // Like Scene.draw, only the tiles near the camera that sceneVisibility marks visible are drawn: the
 // ground is cut per tile in its shader and a loc is shown when one of its tiles is visible.
 // The camera works in client units (128 per tile, y down) so it follows the client's integer maths.
@@ -43,6 +44,8 @@ export class WorldView {
   private readonly locs = new Group()
   /** levelHeightmap: per level the tile corner heights in client units (negative is up), index z * 105 + x */
   private heightmap = WorldView.emptyHeightmap()
+  /** Game.levelTileFlags per level, index z * 104 + x */
+  private tileFlags = WorldView.emptyTileFlags()
   // Draw3D projects with a focal length of 512 px, so the vertical field of view is 2 * atan(167 / 512)
   private readonly camera = new PerspectiveCamera((2 * Math.atan(VIEWPORT_H / 2 / 512) * 180) / Math.PI, VIEWPORT_W / VIEWPORT_H, 0.1, 200)
   /** sceneCenterZoneX/Z; changes when a new region is loaded */
@@ -74,6 +77,10 @@ export class WorldView {
     return Array.from({ length: 4 }, () => new Int32Array(SCENE_CORNERS * SCENE_CORNERS))
   }
 
+  private static emptyTileFlags() {
+    return Array.from({ length: 4 }, () => new Uint8Array(SCENE_SIZE * SCENE_SIZE))
+  }
+
   /** sceneBaseTileX/Z: the world tile at scene (0, 0) */
   get sceneBase() {
     return this.region ? { x: (this.region.zoneX - 6) * 8, z: (this.region.zoneZ - 6) * 8 } : undefined
@@ -86,10 +93,13 @@ export class WorldView {
   async setRegion(zoneX: number, zoneZ: number) {
     if (this.region?.zoneX === zoneX && this.region.zoneZ === zoneZ) return
     const region = this.region = { zoneX, zoneZ }
+    // models bent to the terrain have their own geometry; the rest share it with the cached originals
+    for (const loc of this.locs.children) if (loc.userData.ownGeometry) loc.traverse(object => (object as Mesh).geometry?.dispose())
     this.locs.clear()
     for (const model of this.ground.children) disposeModel(model)
     this.ground.clear()
     this.heightmap = WorldView.emptyHeightmap()
+    this.tileFlags = WorldView.emptyTileFlags()
     const base = this.sceneBase!
 
     // the map squares (64x64 tiles = 8x8 zones) the scene overlaps, like Game.readRebuildRegion
@@ -109,9 +119,7 @@ export class WorldView {
         const z = mz * 64 + lz - base.z
         // SceneBuilder.readLocs skips the scene's outer edge
         if (x <= 0 || z <= 0 || x >= SCENE_SIZE - 1 || z >= SCENE_SIZE - 1) continue
-        // only centrepieces (10, and 11 = turned 45 degrees) for now; walls and decoration use other model kinds
-        if (kind !== 10 && kind !== 11) continue
-        placed.push(this.addLoc(locId, x, z, level, rotation, kind === 11))
+        placed.push(this.addLoc(locId, x, z, level, kind, rotation))
       }
     }
     await Promise.all(placed)
@@ -137,6 +145,14 @@ export class WorldView {
           const sz = originZ + z
           if (sx < 0 || sz < 0 || sx >= SCENE_CORNERS || sz >= SCENE_CORNERS) continue
           this.heightmap[level]![sz * SCENE_CORNERS + sx] = heights[z * SQUARE_CORNERS + x]!
+        }
+      }
+      for (let z = 0; z < 64; z++) {
+        for (let x = 0; x < 64; x++) {
+          const sx = originX + x
+          const sz = originZ + z
+          if (sx < 0 || sz < 0 || sx >= SCENE_SIZE || sz >= SCENE_SIZE) continue
+          this.tileFlags[level]![sz * SCENE_SIZE + sx] = square.flags?.[level]?.[z * 64 + x] ?? 0
         }
       }
     }
@@ -189,9 +205,54 @@ export class WorldView {
     return this.player && { x: this.player.x * 128 + 64, z: this.player.z * 128 + 64 }
   }
 
-  /** Scene.draw draws the levels up to the top level, which is the player's level when the roofs are hidden. */
-  private levelVisible(level: number) {
-    return !this.player || level <= this.player.level
+  private flag(level: number, x: number, z: number) {
+    return x < 0 || z < 0 || x >= SCENE_SIZE || z >= SCENE_SIZE ? 0 : this.tileFlags[level]![z * SCENE_SIZE + x]!
+  }
+
+  /** SceneBuilder.getDrawLevel: the level a tile is drawn with, so Scene.draw skips it above the top level. */
+  private drawLevel(level: number, x: number, z: number) {
+    if (this.flag(level, x, z) & 8) return 0
+    if (level > 0 && this.flag(1, x, z) & 2) return level - 1
+    return level
+  }
+
+  /**
+   * Game.getTopLevel: all levels are drawn unless a roof tile (flag 4) on the player's level is
+   * under the camera, the player, or a tile on the line between them; then levels above the
+   * player's are hidden so you can see inside.
+   */
+  private topLevel(eye: { x: number, z: number, pitch: number }) {
+    const level = this.player!.level
+    const position = this.playerPosition!
+    const roof = (x: number, z: number) => (this.flag(level, x, z) & 4) !== 0
+    let top = 3
+    if (eye.pitch < 310) {
+      let x = eye.x >> 7
+      let z = eye.z >> 7
+      const playerX = position.x >> 7
+      const playerZ = position.z >> 7
+      if (roof(x, z)) top = level
+      const deltaX = Math.abs(playerX - x)
+      const deltaZ = Math.abs(playerZ - z)
+      // walk the major axis one tile at a time and the minor one when the accumulator overflows
+      const xMajor = deltaX > deltaZ
+      const delta = xMajor ? Math.trunc((deltaZ * 0x10000) / deltaX) : Math.trunc((deltaX * 0x10000) / deltaZ)
+      let accumulator = 32768
+      while (xMajor ? x !== playerX : z !== playerZ) {
+        if (xMajor) x += Math.sign(playerX - x)
+        else z += Math.sign(playerZ - z)
+        if (roof(x, z)) top = level
+        accumulator += delta
+        if (accumulator >= 0x10000) {
+          accumulator -= 0x10000
+          if (xMajor) z += Math.sign(playerZ - z)
+          else x += Math.sign(playerX - x)
+          if (roof(x, z)) top = level
+        }
+      }
+    }
+    if (roof(position.x >> 7, position.z >> 7)) top = level
+    return top
   }
 
   /**
@@ -218,31 +279,43 @@ export class WorldView {
   }
 
   /**
-   * SceneBuilder.addLoc + Scene.add for a centrepiece: the model is centred on the tiles it covers
-   * (sizes swap when turned a quarter) and rotated by rotateY90 per rotation step.
+   * SceneBuilder.addLoc: the models LocType.getModel builds for the placement, already rotated (or
+   * mirrored) and lit, at the average height of the corners of the loc's tile. Centrepieces (10, 11)
+   * are centred on the tiles they cover (sizes swap when turned a quarter) and kind 11 is turned 45
+   * degrees more; walls (0-3, 9) and roofs (12-21) sit on the centre of their tile, and an
+   * L-shaped wall (2) is a mirrored model plus the next rotation.
    */
-  private async addLoc(locId: number, x: number, z: number, level: number, rotation: number, diagonal: boolean) {
+  private async addLoc(locId: number, x: number, z: number, level: number, kind: number, rotation: number) {
     const region = this.region
     const entry = await this.models.entry(locId)
     if (!entry) return
-    const model = await this.models.get(locId)
-    // skip it if the model isn't exported, or a new region was loaded meanwhile
-    if (!model || this.region !== region) return
+    const variants = kind === 2 ? [[2, 4 + rotation], [2, (rotation + 1) & 3]] : [[kind === 11 ? 10 : kind, rotation]]
+    const models = await Promise.all(variants.map(([modelKind, variant]) => this.models.get(locId, modelKind!, variant!)))
+    // skip it if the models aren't exported, or a new region was loaded meanwhile
+    if (models.some(model => !model) || this.region !== region) return
 
-    const [sizeX, sizeZ] = entry.size
+    const centrepiece = kind === 10 || kind === 11
+    const [sizeX, sizeZ] = centrepiece ? entry.size : [1, 1]
     const width = rotation === 1 || rotation === 3 ? sizeZ : sizeX
     const length = rotation === 1 || rotation === 3 ? sizeX : sizeZ
-    // SceneBuilder.addLoc: the average height of the corners of the loc's south-west tile
     const heights = this.heightmap[level]!
     const corner = (cx: number, cz: number) => heights[cz * SCENE_CORNERS + cx]!
-    const y = (corner(x, z) + corner(x + 1, z) + corner(x + 1, z + 1) + corner(x, z + 1)) >> 2
-    model.position.set(x + width / 2, -y / 128, -(z + length / 2))
-    // rotateY90 maps (x, z) to (z, -x); with north being -z that is -90 degrees around y
-    model.rotation.y = -rotation * (Math.PI / 2) - (diagonal ? Math.PI / 4 : 0)
-    model.userData.level = level
-    model.userData.tiles = { x, z, width, length }
-    model.visible = false
-    this.locs.add(model)
+    const corners = [corner(x, z), corner(x + 1, z), corner(x + 1, z + 1), corner(x, z + 1)] as const
+    const y = (corners[0] + corners[1] + corners[2] + corners[3]) >> 2
+
+    for (const model of models as Object3D[]) {
+      if (entry.adjustToTerrain) {
+        adjustToTerrain(model, ...corners)
+        model.userData.ownGeometry = true
+      }
+      model.position.set(x + width / 2, -y / 128, -(z + length / 2))
+      // Model.draw's yaw 256; yaw 512 turns like rotateY90, (x, z) to (z, -x), which is -90 degrees around y
+      if (kind === 11) model.rotation.y = -Math.PI / 4
+      model.userData.level = level
+      model.userData.tiles = { x, z, width, length }
+      model.visible = false
+      this.locs.add(model)
+    }
   }
 
   /**
@@ -313,15 +386,16 @@ export class WorldView {
    * player's are skipped. Locs are shown when one of the tiles they cover is drawn.
    */
   private updateVisibility(eye: { x: number, y: number, z: number, pitch: number, yaw: number }) {
+    const topLevel = this.topLevel(eye)
     const map = visibilityMap(eye.pitch, eye.yaw)
     const eyeTileX = Math.min(Math.max(eye.x, 0), SCENE_SIZE * 128 - 1) >> 7
     const eyeTileZ = Math.min(Math.max(eye.z, 0), SCENE_SIZE * 128 - 1) >> 7
     this.tileMask.fill(0)
     for (let level = 0; level < 4; level++) {
-      if (!this.levelVisible(level)) continue
       const heights = this.heightmap[level]!
       for (let x = Math.max(eyeTileX - DRAW_RADIUS, 0); x < Math.min(eyeTileX + DRAW_RADIUS, SCENE_SIZE); x++) {
         for (let z = Math.max(eyeTileZ - DRAW_RADIUS, 0); z < Math.min(eyeTileZ + DRAW_RADIUS, SCENE_SIZE); z++) {
+          if (this.drawLevel(level, x, z) > topLevel) continue
           const visible = map[(x - eyeTileX + DRAW_RADIUS) * DRAW_RADIUS * 2 + z - eyeTileZ + DRAW_RADIUS]
             || heights[z * SCENE_CORNERS + x]! - eye.y >= 2000
           if (visible) this.tileMask[(level * SCENE_SIZE + z) * SCENE_SIZE + x] = 255
@@ -371,5 +445,30 @@ function disposeModel(model: Object3D) {
     const material = mesh.material as MeshBasicMaterial
     material.map?.dispose()
     material.dispose()
+  })
+}
+
+/**
+ * LocType.getModel with adjustToTerrain: every vertex moves by the ground height under it (between
+ * the tile's corners, with the model's origin at the tile centre) minus the tile's average height.
+ * The geometry is copied first as the clone shares it with the cached original.
+ */
+function adjustToTerrain(model: Object3D, sw: number, se: number, ne: number, nw: number) {
+  const groundY = Math.trunc((sw + se + ne + nw) / 4)
+  model.traverse((object) => {
+    const mesh = object as Mesh
+    if (!mesh.isMesh) return
+    mesh.geometry = mesh.geometry.clone()
+    const position = mesh.geometry.attributes.position!
+    for (let i = 0; i < position.count; i++) {
+      const x = Math.round(position.getX(i) * 128)
+      const z = Math.round(-position.getZ(i) * 128)
+      const heightS = sw + Math.trunc(((se - sw) * (x + 64)) / 128)
+      const heightN = nw + Math.trunc(((ne - nw) * (x + 64)) / 128)
+      const y = heightS + Math.trunc(((heightN - heightS) * (z + 64)) / 128)
+      position.setY(i, position.getY(i) - (y - groundY) / 128)
+    }
+    position.needsUpdate = true
+    mesh.geometry.computeBoundingSphere()
   })
 }

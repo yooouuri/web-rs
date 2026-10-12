@@ -14,6 +14,8 @@ export interface TerrainSquare {
   levels: number[]
   /** per level 65x65 corner heights in client units (negative is up), index z * 65 + x */
   heights: number[][]
+  /** per level 64x64 Game.levelTileFlags (2 = bridge, 4 = roof, 8 = drawn with level 0), index z * 64 + x */
+  flags: number[][]
 }
 
 export class Terrain {

@@ -17,10 +17,17 @@ import javax.imageio.ImageIO;
 // Coordinates: RS is x east, y down, z north with 128 units per tile; glTF gets (x, -y, -z) / 128,
 // a 180 degree turn around x, so one unit is one tile, y is up and north is -z.
 //
-// Each loc goes to <outdir>/<locId>-<modelIds>.glb (e.g. 879-1497.glb), and <outdir>/index.json
-// is rewritten as the lookup table the client uses to find them (app/utils/locModels.ts):
-//   { "879": { "name": "Fountain", "models": [1497], "size": [2, 2], "file": "879-1497.glb" }, ... }
-// size is LocType.sizeX/sizeZ in tiles, needed to centre the model on its tiles.
+// A loc has a model per kind (wall, roof, centrepiece...) and the client rotates and mirrors it
+// before lighting it, so each variant the maps use is exported separately: the loc files of every
+// map square are scanned for the loc's placements (kind, rotation), which SceneBuilder.addLoc turns
+// into LocType.getModel(modelKind, variant) calls (see variants). Each goes to
+// <outdir>/<locId>-<modelKind>-<variant>.glb, variant 0..3 is the rotation and 4..7 the mirrored
+// rotation. <outdir>/index.json is rewritten as the lookup table app/utils/locModels.ts uses:
+//   { "879": { "name": "Fountain", "size": [2, 2], "adjustToTerrain": false,
+//              "models": { "10_0": "879-10-0.glb", "10_1": "879-10-1.glb" } }, ... }
+// size is LocType.sizeX/sizeZ in tiles, needed to centre centrepieces on their tiles, and
+// adjustToTerrain means the client bends the model to the slope of its tile when it is placed.
+// Wall decorations (kinds 4-8) and ground decorations (22) aren't exported yet.
 // Pass every loc that should be in the index; the index only lists the locs of this run.
 //
 // With "terrain" it exports the ground of map squares instead, see exportTerrain.
@@ -63,6 +70,9 @@ public class ModelExport {
         headers.setAccessible(true);
         headers.set(null, java.lang.reflect.Array.newInstance(headers.getType().getComponentType(), 65535));
 
+        FileStore maps = new FileStore(500000, dat, new RandomAccessFile(dir + "/main_file_cache.idx4", "r"), 5);
+        HashMap<Integer, TreeSet<Integer>> placements = placements(archives, maps);
+
         StringBuilder index = new StringBuilder();
         for (int i = 2; i < a.length; i++) {
             int locId = Integer.parseInt(a[i]);
@@ -71,37 +81,82 @@ public class ModelExport {
                 System.out.println("loc " + locId + " (" + loc.name + ") has no models, skipped");
                 continue;
             }
-            StringJoiner ids = new StringJoiner(","), fileIds = new StringJoiner("_");
             for (int id : loc.modelIDs) {
                 Model.unpack(new GZIPInputStream(new ByteArrayInputStream(models.read(id & 0xffff))).readAllBytes(), id & 0xffff);
-                ids.add(String.valueOf(id & 0xffff));
-                fileIds.add(String.valueOf(id & 0xffff));
             }
-            String file = locId + "-" + fileIds + ".glb";
-            export(loc, locId, outDir + "/" + file);
+
+            TreeSet<Integer> variants = new TreeSet<>();
+            for (int placement : placements.getOrDefault(locId, new TreeSet<>())) variants.addAll(variants(placement >> 2, placement & 3));
+            StringJoiner files = new StringJoiner(", ");
+            for (int variant : variants) {
+                int kind = variant >> 3, rotation = variant & 7;
+                Model m = loc.getModel(kind, rotation, 0, 0, 0, 0, -1);
+                if (m == null) continue;
+                String file = locId + "-" + kind + "-" + rotation + ".glb";
+                System.out.println("loc " + locId + " (" + loc.name + ") kind " + kind + " variant " + rotation + ": " + m.faceCount + " faces -> " + file);
+                exportModel(m, outDir + "/" + file, null, outDir);
+                files.add("\"" + kind + "_" + rotation + "\": \"" + file + "\"");
+            }
+            if (files.length() == 0) {
+                System.out.println("loc " + locId + " (" + loc.name + ") isn't placed as a wall, roof or centrepiece, skipped");
+                continue;
+            }
+
             String name = loc.name == null ? "" : loc.name.replace("\\", "\\\\").replace("\"", "\\\"");
             sep(index).append("\n  \"").append(locId).append("\": { \"name\": \"").append(name)
-                .append("\", \"models\": [").append(ids).append("], \"size\": [").append(loc.sizeX).append(", ").append(loc.sizeZ)
-                .append("], \"file\": \"").append(file).append("\" }");
+                .append("\", \"size\": [").append(loc.sizeX).append(", ").append(loc.sizeZ)
+                .append("], \"adjustToTerrain\": ").append(loc.adjustToTerrain)
+                .append(", \"models\": { ").append(files).append(" } }");
         }
         try (Writer out = new OutputStreamWriter(new FileOutputStream(outDir + "/index.json"), StandardCharsets.UTF_8)) {
             out.write("{" + index + "\n}\n");
         }
     }
 
-    static void export(LocType loc, int locId, String path) throws IOException {
-        // kind 10 = centrepiece, rotation 0, flat ground, no animation
-        Model m = loc.getModel(10, 0, 0, 0, 0, 0, -1);
-        System.out.println("loc " + locId + " (" + loc.name + "): " + m.vertexCount + " vertices, " + m.faceCount + " faces -> " + path);
-        exportModel(m, path, null);
+    /**
+     * The LocType.getModel(modelKind, variant) calls SceneBuilder.addLoc makes for a placement, as
+     * modelKind << 3 | variant: centrepieces (10, and 11 turned 45 degrees when drawn) use the kind 10
+     * model, an L-shaped wall (2) a mirrored model and the next rotation, walls (0, 1, 3), diagonal
+     * walls (9) and roofs (12-21) their own kind. Decorations aren't supported yet.
+     */
+    static List<Integer> variants(int kind, int rotation) {
+        if (kind == 10 || kind == 11) return List.of(10 << 3 | rotation);
+        if (kind == 2) return List.of(2 << 3 | (4 + rotation), 2 << 3 | ((rotation + 1) & 3));
+        if (kind <= 3 || kind == 9 || (kind >= 12 && kind <= 21)) return List.of(kind << 3 | rotation);
+        return List.of();
+    }
+
+    /** Every loc's placements in all map squares (SceneBuilder.readLocs), as locId -> kind << 2 | rotation. */
+    static HashMap<Integer, TreeSet<Integer>> placements(FileStore archives, FileStore maps) throws IOException {
+        HashMap<Integer, TreeSet<Integer>> placements = new HashMap<>();
+        Buffer index = new Buffer(new FileArchive(archives.read(5)).read("map_index"));
+        for (int i = 0; i < index.data.length / 7; i++) {
+            index.readU16(); // square
+            index.readU16(); // land file
+            int locFile = index.readU16();
+            index.readU8();
+            byte[] gz = maps.read(locFile);
+            if (gz == null) continue;
+            Buffer buf = new Buffer(new GZIPInputStream(new ByteArrayInputStream(gz)).readAllBytes());
+            int locId = -1;
+            for (int deltaId; (deltaId = buf.readUSmart()) != 0; ) {
+                locId += deltaId;
+                while (buf.readUSmart() != 0) {
+                    int info = buf.readU8();
+                    placements.computeIfAbsent(locId, k -> new TreeSet<>()).add(info);
+                }
+            }
+        }
+        return placements;
     }
 
     /**
      * Writes a lit model as a .glb. With labels (Model.vertexLabel, which lighting clears), every vertex
      * also gets its label as the _LABEL attribute: the vertex groups SeqTransform frames move, so
-     * animations can be applied later.
+     * animations can be applied later. With a textureDir the textures are written once to
+     * <textureDir>/textures/<id>.png and referenced, otherwise they are embedded.
      */
-    static void exportModel(Model m, String path, int[] labels) throws IOException {
+    static void exportModel(Model m, String path, int[] labels, String textureDir) throws IOException {
         // one primitive per material: -1 = vertex colours only, otherwise a texture id
         TreeMap<Integer, Prim> prims = new TreeMap<>();
         for (int f = 0; f < m.faceCount; f++) {
@@ -136,7 +191,7 @@ public class ModelExport {
             }
         }
 
-        writeGlb(prims, path);
+        writeGlb(prims, path, textureDir);
         for (Map.Entry<Integer, Prim> e : prims.entrySet()) {
             System.out.println("  " + (e.getKey() == -1 ? "colours" : "texture " + e.getKey()) + ": " + e.getValue().count + " faces" + (e.getValue().blend ? " (transparent)" : ""));
         }
@@ -200,7 +255,7 @@ public class ModelExport {
         for (int color : colors) shades.add(String.valueOf(color));
         String path = outDir + "/" + gender + "_" + slots + "_" + shades + ".glb";
         System.out.println("player: " + count + " parts, " + m.vertexCount + " vertices, " + m.faceCount + " faces -> " + path);
-        exportModel(m, path, labels);
+        exportModel(m, path, labels, null);
     }
 
     /** Where a map square sits in the 104x104 scene, so the 8 squares around it fit in too. */
@@ -215,10 +270,11 @@ public class ModelExport {
      * Locs are not added, so there are no loc shadows on the ground and bridges stay on their own level.
      * The model's origin is the square's south-west corner: tile (x, z) covers x..x+1 and -z-1..-z.
      * Levels without tiles are skipped, level 0 is always written.
-     * <outdir>/<mx>_<mz>.json lists the written levels and the heightmap the client places locs and
+     * <outdir>/<mx>_<mz>.json lists the written levels, the heightmap the client places locs and
      * the camera with (SceneBuilder.levelHeightmap), in client units (negative is up), per level
-     * 65x65 tile corners at index z * 65 + x:
-     *   { "levels": [0, 1], "heights": [[...4225], [...], [...], [...]] }
+     * 65x65 tile corners at index z * 65 + x, and the tile flags (Game.levelTileFlags: 2 = bridge,
+     * 4 = roof, 8 = drawn with level 0) per level 64x64 tiles at index z * 64 + x:
+     *   { "levels": [0, 1], "heights": [[...4225], [...], [...], [...]], "flags": [[...4096], ...] }
      */
     static void exportTerrain(FileStore archives, FileStore maps, String outDir, List<String> squares) throws Exception {
         FloType.unpack(new FileArchive(archives.read(2)));
@@ -262,13 +318,18 @@ public class ModelExport {
             }
             for (int[] o : missing) builder.stitchHeightmap(o[0], o[1], 64, 64);
 
-            StringJoiner levels = new StringJoiner(", "), levelHeights = new StringJoiner(",\n  ");
+            StringJoiner levels = new StringJoiner(", "), levelHeights = new StringJoiner(",\n  "), levelFlags = new StringJoiner(",\n  ");
             for (int level = 0; level < 4; level++) {
                 StringJoiner h = new StringJoiner(",");
                 for (int z = TERRAIN_OFFSET; z <= TERRAIN_OFFSET + 64; z++) {
                     for (int x = TERRAIN_OFFSET; x <= TERRAIN_OFFSET + 64; x++) h.add(String.valueOf(heights[level][x][z]));
                 }
                 levelHeights.add("[" + h + "]");
+                StringJoiner f = new StringJoiner(",");
+                for (int z = TERRAIN_OFFSET; z < TERRAIN_OFFSET + 64; z++) {
+                    for (int x = TERRAIN_OFFSET; x < TERRAIN_OFFSET + 64; x++) f.add(String.valueOf(builder.levelTileFlags[level][x][z]));
+                }
+                levelFlags.add("[" + f + "]");
 
                 lighting.invoke(builder, level);
                 tiles.invoke(builder, scene, level);
@@ -286,13 +347,13 @@ public class ModelExport {
                 levels.add(String.valueOf(level));
 
                 String path = outDir + "/" + name + "_" + level + ".glb";
-                writeGlb(prims, path);
+                writeGlb(prims, path, null);
                 int faces = 0;
                 for (Prim p : prims.values()) faces += p.count;
                 System.out.println("map square " + name + " level " + level + ": " + faces + " faces -> " + path);
             }
             try (Writer out = new OutputStreamWriter(new FileOutputStream(outDir + "/" + name + ".json"), StandardCharsets.UTF_8)) {
-                out.write("{ \"levels\": [" + levels + "], \"heights\": [\n  " + levelHeights + "\n] }\n");
+                out.write("{ \"levels\": [" + levels + "], \"heights\": [\n  " + levelHeights + "\n], \"flags\": [\n  " + levelFlags + "\n] }\n");
             }
         }
     }
@@ -433,7 +494,11 @@ public class ModelExport {
         return out.toByteArray();
     }
 
-    static void writeGlb(TreeMap<Integer, Prim> prims, String path) throws IOException {
+    /** textures already written to a textureDir in this run */
+    static final HashSet<String> writtenTextures = new HashSet<>();
+
+    /** With a textureDir the glb references <textureDir>/textures/<id>.png (relative to the glb, which must be in textureDir). */
+    static void writeGlb(TreeMap<Integer, Prim> prims, String path, String textureDir) throws IOException {
         ByteArrayOutputStream bin = new ByteArrayOutputStream();
         StringBuilder views = new StringBuilder(), accessors = new StringBuilder(), primitives = new StringBuilder();
         StringBuilder materials = new StringBuilder(), textures = new StringBuilder(), images = new StringBuilder();
@@ -461,8 +526,19 @@ public class ModelExport {
                 int uv = accessor(bin, views, accessors, counts, p.uvs, vertices, "VEC2", "");
                 attributes += ",\"TEXCOORD_0\":" + uv;
                 byte[] png = texturePng(e.getKey());
-                int view = view(bin, views, counts, png);
-                sep(images).append("{\"bufferView\":").append(view).append(",\"mimeType\":\"image/png\"}");
+                if (textureDir == null) {
+                    int view = view(bin, views, counts, png);
+                    sep(images).append("{\"bufferView\":").append(view).append(",\"mimeType\":\"image/png\"}");
+                } else {
+                    String uri = "textures/" + e.getKey() + ".png";
+                    if (writtenTextures.add(textureDir + "/" + uri)) {
+                        new File(textureDir, "textures").mkdirs();
+                        try (FileOutputStream out = new FileOutputStream(new File(textureDir, uri))) {
+                            out.write(png);
+                        }
+                    }
+                    sep(images).append("{\"uri\":\"").append(uri).append("\",\"mimeType\":\"image/png\"}");
+                }
                 int image = counts[2]++;
                 sep(textures).append("{\"sampler\":0,\"source\":").append(image).append('}');
                 base = ",\"baseColorTexture\":{\"index\":" + image + "}";
