@@ -36,6 +36,13 @@ public class ModelExport {
         FileStore archives = new FileStore(500000, dat, new RandomAccessFile(dir + "/main_file_cache.idx0", "r"), 1);
         FileStore models = new FileStore(500000, dat, new RandomAccessFile(dir + "/main_file_cache.idx1", "r"), 2);
 
+        // Game.setHighmem: in lowmem textures are 64x64 and getTexels lays them out as 4 shades of
+        // 4096 texels, which texturePng would read as one 128x128 image
+        Draw3D.lowmem = false;
+        Scene.lowmem = false;
+        SceneBuilder.lowmem = false;
+        LocType.lowmem = false;
+
         LocType.unpack(new FileArchive(archives.read(2)));
         Draw3D.unpackTextures(new FileArchive(archives.read(6)));
         Draw3D.setBrightness(0.8);
@@ -215,7 +222,6 @@ public class ModelExport {
      */
     static void exportTerrain(FileStore archives, FileStore maps, String outDir, List<String> squares) throws Exception {
         FloType.unpack(new FileArchive(archives.read(2)));
-        SceneBuilder.lowmem = false;
 
         HashMap<Integer, Integer> landFiles = new HashMap<>();
         Buffer in = new Buffer(new FileArchive(archives.read(5)).read("map_index"));
