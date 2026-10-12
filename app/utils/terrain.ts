@@ -1,5 +1,5 @@
 import { type Mesh, type MeshBasicMaterial, NoColorSpace, type Object3D } from 'three'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 
 // Loads the ground of map squares, exported by tools/ModelExport.java in terrain mode:
 // - public/terrain/<mx>_<mz>.json: the levels that have tiles and SceneBuilder.levelHeightmap

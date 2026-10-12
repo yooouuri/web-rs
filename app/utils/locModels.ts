@@ -1,5 +1,5 @@
 import { type Mesh, type MeshBasicMaterial, NoColorSpace, type Object3D, type Texture } from 'three'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 
 // Finds and caches loc models, like LocType's model caches in the client: the lookup table
 // (public/models/index.json, written by tools/ModelExport.java) maps a loc id to its .glb, each

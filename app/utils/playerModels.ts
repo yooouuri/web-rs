@@ -1,5 +1,5 @@
 import type { Object3D } from 'three'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 
 // Finds and caches player models, like PlayerEntity.modelCache in the client: a look is exported
 // as a whole by tools/ModelExport.java in player mode, so the kits, worn equipment and colours are
