@@ -170,13 +170,18 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* The 765x503 game scaled to fit the window. The size comes from the window only: the canvas is
+   taken out of the flow, so its old size can't hold the box open when the window shrinks. */
 .title-screen {
-  width: min(100vw, calc(100vh * 765 / 503));
-  aspect-ratio: 765 / 503;
+  position: relative;
+  width: min(100vw, 100vh * 765 / 503);
+  height: min(100vh, 100vw * 503 / 765);
   background: #000;
 }
 
 .title-screen :deep(canvas) {
+  position: absolute !important;
+  inset: 0;
   image-rendering: pixelated;
 }
 </style>
