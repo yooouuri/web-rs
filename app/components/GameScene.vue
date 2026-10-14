@@ -37,7 +37,7 @@ onBeforeRender(({ renderer, delta }) => {
 
 function onPointerDown(event: TresPointerEvent) {
   if (event.button !== 0) return
-  props.screen.click(Math.round(event.point.x), Math.round(-event.point.y))
+  props.screen.click(Math.round(event.point.x), Math.round(-event.point.y), event.ctrlKey)
 }
 
 function onPointerMove(event: TresPointerEvent) {
@@ -63,7 +63,12 @@ onUnmounted(() => {
     <TresMeshBasicMaterial :map="texture" />
   </TresMesh>
 
-  <TresMesh :position="[VIEWPORT_X + VIEWPORT_W / 2, -(VIEWPORT_Y + VIEWPORT_H / 2), 1]">
+  <!-- in front of the frame, so it needs the handlers too to get clicks on the 3D view -->
+  <TresMesh
+    :position="[VIEWPORT_X + VIEWPORT_W / 2, -(VIEWPORT_Y + VIEWPORT_H / 2), 1]"
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+  >
     <TresPlaneGeometry :args="[VIEWPORT_W, VIEWPORT_H]" />
     <TresMeshBasicMaterial :map="world.target.texture" />
   </TresMesh>

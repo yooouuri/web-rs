@@ -16,6 +16,8 @@ export interface TerrainSquare {
   heights: number[][]
   /** per level 64x64 Game.levelTileFlags (2 = bridge, 4 = roof, 8 = drawn with level 0), index z * 64 + x */
   flags: number[][]
+  /** per level 64x64 Game.levelCollisionMap flags (CollisionMap.FLAG_*), index z * 64 + x */
+  collision: number[][]
 }
 
 export class Terrain {

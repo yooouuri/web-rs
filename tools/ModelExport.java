@@ -63,7 +63,7 @@ public class ModelExport {
 
         if (a.length > 2 && a[2].equals("terrain")) {
             FileStore maps = new FileStore(500000, dat, new RandomAccessFile(dir + "/main_file_cache.idx4", "r"), 5);
-            exportTerrain(archives, maps, outDir, Arrays.asList(a).subList(3, a.length));
+            exportTerrain(archives, maps, models, outDir, Arrays.asList(a).subList(3, a.length));
             return;
         }
         if (a.length > 2 && a[2].equals("player")) {
@@ -232,15 +232,8 @@ public class ModelExport {
         IdkType.unpack(config);
         ObjType.unpack(config);
 
-        // Model.tryGet needs the header of every model the kits and objs use; worn obj models are
-        // picked per gender inside ObjType, so simply load them all
-        java.lang.reflect.Field headers = Model.class.getDeclaredField("headers");
-        headers.setAccessible(true);
-        headers.set(null, java.lang.reflect.Array.newInstance(headers.getType().getComponentType(), 65535));
-        for (int id = 0; id < 65535; id++) {
-            byte[] gz = models.read(id);
-            if (gz != null) Model.unpack(new GZIPInputStream(new ByteArrayInputStream(gz)).readAllBytes(), id);
-        }
+        // worn obj models are picked per gender inside ObjType, so simply load them all
+        loadAllModels(models);
 
         Model[] parts = new Model[12];
         int count = 0;
@@ -268,6 +261,17 @@ public class ModelExport {
         exportModel(m, path, labels, null);
     }
 
+    /** Model.tryGet needs the header of every model it is asked for (else it asks OnDemand, which isn't there), so load them all. */
+    static void loadAllModels(FileStore models) throws Exception {
+        java.lang.reflect.Field headers = Model.class.getDeclaredField("headers");
+        headers.setAccessible(true);
+        headers.set(null, java.lang.reflect.Array.newInstance(headers.getType().getComponentType(), 65535));
+        for (int id = 0; id < 65535; id++) {
+            byte[] gz = models.read(id);
+            if (gz != null) Model.unpack(new GZIPInputStream(new ByteArrayInputStream(gz)).readAllBytes(), id);
+        }
+    }
+
     /** Where a map square sits in the 104x104 scene, so the 8 squares around it fit in too. */
     static final int TERRAIN_OFFSET = 20;
 
@@ -284,17 +288,22 @@ public class ModelExport {
      * the camera with (SceneBuilder.levelHeightmap), in client units (negative is up), per level
      * 65x65 tile corners at index z * 65 + x, and the tile flags (Game.levelTileFlags: 2 = bridge,
      * 4 = roof, 8 = drawn with level 0) per level 64x64 tiles at index z * 64 + x:
-     *   { "levels": [0, 1], "heights": [[...4225], [...], [...], [...]], "flags": [[...4096], ...] }
+     * and the collision flags the client walks with (Game.levelCollisionMap, CollisionMap.FLAG_*), also
+     * per level 64x64 at index z * 64 + x:
+     *   { "levels": [0, 1], "heights": [[...4225], ...], "flags": [[...4096], ...], "collision": [[...4096], ...] }
      */
-    static void exportTerrain(FileStore archives, FileStore maps, String outDir, List<String> squares) throws Exception {
-        FloType.unpack(new FileArchive(archives.read(2)));
+    static void exportTerrain(FileStore archives, FileStore maps, FileStore models, String outDir, List<String> squares) throws Exception {
+        FileArchive config = new FileArchive(archives.read(2));
+        FloType.unpack(config);
+        SeqType.unpack(config); // animated locs become LocEntitys, which look up their SeqType
+        loadAllModels(models); // SceneBuilder.addLoc builds every loc's model
 
-        HashMap<Integer, Integer> landFiles = new HashMap<>();
+        HashMap<Integer, Integer> landFiles = new HashMap<>(), locFiles = new HashMap<>();
         Buffer in = new Buffer(new FileArchive(archives.read(5)).read("map_index"));
         for (int i = 0; i < in.data.length / 7; i++) {
             int square = in.readU16();
             landFiles.put(square, in.readU16());
-            in.readU16(); // loc file
+            locFiles.put(square, in.readU16());
             in.readU8();
         }
 
@@ -328,7 +337,10 @@ public class ModelExport {
             }
             for (int[] o : missing) builder.stitchHeightmap(o[0], o[1], 64, 64);
 
+            int[][][] collisionFlags = collision(maps, landFiles, locFiles, mx, mz);
+
             StringJoiner levels = new StringJoiner(", "), levelHeights = new StringJoiner(",\n  "), levelFlags = new StringJoiner(",\n  ");
+            StringJoiner levelCollision = new StringJoiner(",\n  ");
             for (int level = 0; level < 4; level++) {
                 StringJoiner h = new StringJoiner(",");
                 for (int z = TERRAIN_OFFSET; z <= TERRAIN_OFFSET + 64; z++) {
@@ -340,6 +352,11 @@ public class ModelExport {
                     for (int x = TERRAIN_OFFSET; x < TERRAIN_OFFSET + 64; x++) f.add(String.valueOf(builder.levelTileFlags[level][x][z]));
                 }
                 levelFlags.add("[" + f + "]");
+                StringJoiner c = new StringJoiner(",");
+                for (int z = TERRAIN_OFFSET; z < TERRAIN_OFFSET + 64; z++) {
+                    for (int x = TERRAIN_OFFSET; x < TERRAIN_OFFSET + 64; x++) c.add(String.valueOf(collisionFlags[level][x][z]));
+                }
+                levelCollision.add("[" + c + "]");
 
                 lighting.invoke(builder, level);
                 tiles.invoke(builder, scene, level);
@@ -363,9 +380,52 @@ public class ModelExport {
                 System.out.println("map square " + name + " level " + level + ": " + faces + " faces -> " + path);
             }
             try (Writer out = new OutputStreamWriter(new FileOutputStream(outDir + "/" + name + ".json"), StandardCharsets.UTF_8)) {
-                out.write("{ \"levels\": [" + levels + "], \"heights\": [\n  " + levelHeights + "\n], \"flags\": [\n  " + levelFlags + "\n] }\n");
+                out.write("{ \"levels\": [" + levels + "], \"heights\": [\n  " + levelHeights + "\n], \"flags\": [\n  " + levelFlags + "\n], \"collision\": [\n  " + levelCollision + "\n] }\n");
             }
         }
+    }
+
+    /**
+     * The collision maps of the scene around a map square, built like Game.buildSceneStandard: the
+     * land and loc files of the square and its 8 neighbours are read into a SceneBuilder (readTiles
+     * clears FLAG_UNINITIALIZED on loaded tiles, readLocs adds walls and locs through addLoc, which
+     * also marks tiles across the square's edge), then applyBlockFlags makes the solid tiles block.
+     * Tiles of missing squares stay uninitialized (blocked) like in the client. This uses its own
+     * builder because readLocs also adds the locs' shadows to the shademap, which the exported
+     * terrain doesn't have. Returns flags[level][x][z] in scene tiles, the square at TERRAIN_OFFSET.
+     */
+    static int[][][] collision(FileStore maps, HashMap<Integer, Integer> landFiles, HashMap<Integer, Integer> locFiles, int mx, int mz) throws Exception {
+        int baseX = mx * 64 - TERRAIN_OFFSET, baseZ = mz * 64 - TERRAIN_OFFSET;
+        int[][][] heights = new int[4][105][105];
+        SceneBuilder builder = new SceneBuilder(new byte[4][104][104], 104, 104, heights);
+        CollisionMap[] collision = new CollisionMap[4];
+        for (int l = 0; l < 4; l++) collision[l] = new CollisionMap(104, 104);
+        Scene scene = new Scene(104, 104, heights, 4);
+
+        for (HashMap<Integer, Integer> files : List.of(landFiles, locFiles)) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    int offsetX = (mx + dx) * 64 - baseX, offsetZ = (mz + dz) * 64 - baseZ;
+                    Integer file = files.get(((mx + dx) << 8) | (mz + dz));
+                    byte[] gz = file == null ? null : maps.read(file);
+                    if (gz == null) {
+                        if (files == landFiles) builder.stitchHeightmap(offsetX, offsetZ, 64, 64);
+                        continue;
+                    }
+                    byte[] data = new GZIPInputStream(new ByteArrayInputStream(gz)).readAllBytes();
+                    if (files == landFiles) builder.readTiles(data, offsetZ, offsetX, baseX, baseZ, collision);
+                    else builder.readLocs(collision, scene, offsetX, offsetZ, data);
+                }
+            }
+        }
+
+        java.lang.reflect.Method blockFlags = SceneBuilder.class.getDeclaredMethod("applyBlockFlags", CollisionMap[].class);
+        blockFlags.setAccessible(true);
+        blockFlags.invoke(builder, (Object) collision);
+
+        int[][][] flags = new int[4][][];
+        for (int l = 0; l < 4; l++) flags[l] = collision[l].flags;
+        return flags;
     }
 
     /**

@@ -1,7 +1,8 @@
 import { drawString, drawStringCenter, stringWidth } from './bitmapFont'
 import { INTERFACES, type IfComponent } from './interfaces'
 import { fontBold12, fontPlain12 } from './titleData'
-import { WorldView } from './worldView'
+import { PacketOut, writeMove } from './packetStream'
+import { VIEWPORT_H, VIEWPORT_W, VIEWPORT_X, VIEWPORT_Y, WorldView } from './worldView'
 
 // Port of Game.drawGame and the parts it draws before a map has loaded (sceneState != 2):
 // the frame, sidebar (drawSidebar), tab icons (drawSideicons), chat (drawChatback / drawChat)
@@ -81,11 +82,11 @@ export class GameScreen {
     private readonly sideicons: HTMLImageElement[],
     private readonly interfaceImages: Record<string, HTMLImageElement>,
     private readonly username: string,
-    /** Game.useButton: sends the button click (packet 185) to the server */
-    private readonly onButton: (id: number) => void,
+    /** sends a packet to the server (opcode, payload) */
+    private readonly send: (op: number, payload: number[]) => void,
   ) {}
 
-  static async load(username: string, onButton: (id: number) => void) {
+  static async load(username: string, send: (op: number, payload: number[]) => void) {
     const ifImages = Object.values(INTERFACES).flat().flatMap(c => (c.type === 'image' ? [c.image] : []))
     const [frame, sideicons, ifLoaded] = await Promise.all([
       Promise.all(FRAME.map(name => loadImage(`/game/${name}.png`))),
@@ -94,7 +95,7 @@ export class GameScreen {
     ])
     const images = Object.fromEntries(FRAME.map((name, i) => [name, frame[i]!])) as Record<FrameImage, HTMLImageElement>
     const interfaceImages = Object.fromEntries(ifImages.map((name, i) => [name, ifLoaded[i]!]))
-    return new GameScreen(images, sideicons, interfaceImages, username, onButton)
+    return new GameScreen(images, sideicons, interfaceImages, username, send)
   }
 
   /** components of the open tab's interface, if it has been exported */
@@ -114,10 +115,19 @@ export class GameScreen {
     }
   }
 
-  click(mx: number, my: number) {
-    // Game.handleInterfaceInput + useButton: left click on a standard button
+  /** A left click at (mx, my) in game pixels; run is the client's Ctrl key (actionKey[5]). */
+  click(mx: number, my: number, run = false) {
+    // the 3D view: for now "Walk here" is the only menu option there, so a left click walks
+    // (Game.handleViewportOptions + useWalkHereOption + tryMove)
+    if (mx >= VIEWPORT_X && my >= VIEWPORT_Y && mx < VIEWPORT_X + VIEWPORT_W && my < VIEWPORT_Y + VIEWPORT_H) {
+      const move = this.world.walk(mx - VIEWPORT_X, my - VIEWPORT_Y)
+      if (move) this.send(PacketOut.MOVE_GAMECLICK, writeMove(move.waypoints, move.baseX, move.baseZ, run))
+      return
+    }
+
+    // Game.handleInterfaceInput + useButton: left click on a standard button (packet 185)
     for (const c of this.sidebarComponents) {
-      if (c.type === 'text' && c.optionType === 1 && inside(c, mx, my)) this.onButton(c.id)
+      if (c.type === 'text' && c.optionType === 1 && inside(c, mx, my)) this.send(PacketOut.IF_BUTTON, [c.id >> 8, c.id & 0xff])
     }
 
     // Game.handleTabInput. The boxes overlap a little; like the client, the last match wins.

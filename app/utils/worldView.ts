@@ -1,5 +1,6 @@
-import { Color, DataTexture, Group, type Material, type Mesh, type MeshBasicMaterial, NearestFilter, type Object3D, PerspectiveCamera, RedFormat, Scene, WebGLRenderTarget, type WebGLRenderer } from 'three'
+import { Color, DataTexture, Group, type Material, type Mesh, type MeshBasicMaterial, NearestFilter, type Object3D, PerspectiveCamera, Raycaster, RedFormat, Scene, Vector2, WebGLRenderTarget, type WebGLRenderer } from 'three'
 import { LocModels } from './locModels'
+import { FLAG_CLOSED, FLAG_UNINITIALIZED, findPath } from './pathfinding'
 import { type Appearance, DEFAULT_APPEARANCE, PlayerModels } from './playerModels'
 import { COS, DRAW_RADIUS, SIN, visibilityMap } from './sceneVisibility'
 import { SQUARE_CORNERS, Terrain } from './terrain'
@@ -46,6 +47,9 @@ export class WorldView {
   private heightmap = WorldView.emptyHeightmap()
   /** Game.levelTileFlags per level, index z * 104 + x */
   private tileFlags = WorldView.emptyTileFlags()
+  /** Game.levelCollisionMap flags per level, index z * 104 + x */
+  private collision = WorldView.emptyCollision()
+  private readonly raycaster = new Raycaster()
   // Draw3D projects with a focal length of 512 px, so the vertical field of view is 2 * atan(167 / 512)
   private readonly camera = new PerspectiveCamera((2 * Math.atan(VIEWPORT_H / 2 / 512) * 180) / Math.PI, VIEWPORT_W / VIEWPORT_H, 0.1, 200)
   /** sceneCenterZoneX/Z; changes when a new region is loaded */
@@ -81,6 +85,17 @@ export class WorldView {
     return Array.from({ length: 4 }, () => new Uint8Array(SCENE_SIZE * SCENE_SIZE))
   }
 
+  /** CollisionMap.reset: closed around the edge, blocked inside until a map square fills it in */
+  private static emptyCollision() {
+    return Array.from({ length: 4 }, () => {
+      const flags = new Int32Array(SCENE_SIZE * SCENE_SIZE).fill(FLAG_UNINITIALIZED)
+      for (let i = 0; i < SCENE_SIZE; i++) {
+        flags[i] = flags[(SCENE_SIZE - 1) * SCENE_SIZE + i] = flags[i * SCENE_SIZE] = flags[i * SCENE_SIZE + SCENE_SIZE - 1] = FLAG_CLOSED
+      }
+      return flags
+    })
+  }
+
   /** sceneBaseTileX/Z: the world tile at scene (0, 0) */
   get sceneBase() {
     return this.region ? { x: (this.region.zoneX - 6) * 8, z: (this.region.zoneZ - 6) * 8 } : undefined
@@ -100,6 +115,7 @@ export class WorldView {
     this.ground.clear()
     this.heightmap = WorldView.emptyHeightmap()
     this.tileFlags = WorldView.emptyTileFlags()
+    this.collision = WorldView.emptyCollision()
     const base = this.sceneBase!
 
     // the map squares (64x64 tiles = 8x8 zones) the scene overlaps, like Game.readRebuildRegion
@@ -153,6 +169,10 @@ export class WorldView {
           const sz = originZ + z
           if (sx < 0 || sz < 0 || sx >= SCENE_SIZE || sz >= SCENE_SIZE) continue
           this.tileFlags[level]![sz * SCENE_SIZE + sx] = square.flags?.[level]?.[z * 64 + x] ?? 0
+          // the scene's edge stays closed like in the client
+          if (sx > 0 && sz > 0 && sx < SCENE_SIZE - 1 && sz < SCENE_SIZE - 1 && square.collision) {
+            this.collision[level]![sz * SCENE_SIZE + sx] = square.collision[level]![z * 64 + x]!
+          }
         }
       }
     }
@@ -272,6 +292,38 @@ export class WorldView {
   setPlayer(x: number, z: number, level: number) {
     if (!this.appearance) void this.setAppearance(DEFAULT_APPEARANCE)
     this.player = { x, z, level }
+  }
+
+  /**
+   * Walk here: Scene.click finds the ground tile under the mouse while drawing, here a ray from the
+   * camera through the viewport pixel hits the ground models, and the first hit on a tile that is
+   * drawn counts. Then Game.tryMove searches a path from the player's tile to it. Returns the
+   * waypoints to send with the scene's world origin, or undefined when nothing was hit or reachable.
+   */
+  walk(viewportX: number, viewportY: number) {
+    const base = this.sceneBase
+    if (!this.player || !base) return undefined
+    const tile = this.groundTileAt(viewportX, viewportY)
+    if (!tile) return undefined
+    const waypoints = findPath(this.collision[this.player.level]!, this.player.x, this.player.z, tile.x, tile.z, true)
+    return waypoints && { waypoints, baseX: base.x, baseZ: base.z }
+  }
+
+  /** The scene tile of the drawn ground under a viewport pixel (0..511, 0..333). */
+  private groundTileAt(viewportX: number, viewportY: number) {
+    const ndc = new Vector2((viewportX / VIEWPORT_W) * 2 - 1, 1 - (viewportY / VIEWPORT_H) * 2)
+    this.raycaster.setFromCamera(ndc, this.camera)
+    for (const hit of this.raycaster.intersectObject(this.ground, true)) {
+      const x = Math.floor(hit.point.x)
+      const z = Math.floor(-hit.point.z)
+      if (x < 0 || z < 0 || x >= SCENE_SIZE || z >= SCENE_SIZE) continue
+      // the level of the terrain model this mesh belongs to
+      let level: number | undefined
+      for (let object: Object3D | null = hit.object; object && level === undefined; object = object.parent) level = object.userData.level
+      // skip tiles the shader discards: outside the drawn area or on a hidden level
+      if (level !== undefined && this.tileMask[(level * SCENE_SIZE + z) * SCENE_SIZE + x] === 255) return { x, z }
+    }
+    return undefined
   }
 
   movePlayer(dx: number, dz: number) {

@@ -49,7 +49,7 @@ async function login(box: TitleBox) {
         const [rights, flagged] = await connection.read(2)
         console.info('logged in', { rights, flagged: flagged === 1 })
         const stream = new PacketStream(connection, isaacSeed)
-        game.value = await GameScreen.load(box.username, id => stream.send(PacketOut.IF_BUTTON, [id >> 8, id]))
+        game.value = await GameScreen.load(box.username, (op, payload) => stream.send(op, payload))
         box.hideButtons = false
         readPackets(stream, game.value)
         return

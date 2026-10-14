@@ -79,8 +79,26 @@ export function readLocalPlayer(data: Uint8Array): LocalPlayerUpdate {
 export const PacketOut = {
   /** sent when nothing else was sent for a while; RuneSource drops clients silent for 5s */
   NO_TIMEOUT: 0,
+  /** Game.tryMove type 0: walk here (98 walks to a loc or NPC, 248 comes from the minimap) */
+  MOVE_GAMECLICK: 164,
   IF_BUTTON: 185,
 } as const
+
+/**
+ * The payload Game.tryMove writes after the opcode: the length (a u8, the packet is variable
+ * size), the first waypoint's world x (write16LEA: low byte + 128), the other waypoints as
+ * signed bytes relative to the first, its world z (write16LE) and whether to run (write8C, negated).
+ * Waypoints are scene tiles from findPath; base is the scene's world origin (sceneBaseTileX/Z).
+ */
+export function writeMove(waypoints: [number, number][], baseX: number, baseZ: number, run: boolean): number[] {
+  const [startX, startZ] = waypoints[0]!
+  const x = startX + baseX
+  const z = startZ + baseZ
+  const out = [waypoints.length * 2 + 3, (x + 128) & 0xff, (x >> 8) & 0xff]
+  for (const [wx, wz] of waypoints.slice(1)) out.push((wx - startX) & 0xff, (wz - startZ) & 0xff)
+  out.push(z & 0xff, (z >> 8) & 0xff, -Number(run) & 0xff)
+  return out
+}
 
 type Connection = ReturnType<typeof useGameConnection>
 
