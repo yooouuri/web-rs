@@ -24,9 +24,15 @@ import javax.imageio.ImageIO;
 // <outdir>/<locId>-<modelKind>-<variant>.glb, variant 0..3 is the rotation and 4..7 the mirrored
 // rotation. <outdir>/index.json is rewritten as the lookup table app/utils/locModels.ts uses:
 //   { "879": { "name": "Fountain", "size": [2, 2], "adjustToTerrain": false,
+//              "options": [null, null, null, null, null], "interactable": true, "solid": true,
+//              "blocksProjectiles": true, "interactionSideFlags": 0,
 //              "models": { "10_0": "879-10-0.glb", "10_1": "879-10-1.glb" } }, ... }
 // size is LocType.sizeX/sizeZ in tiles, needed to centre centrepieces on their tiles, and
 // adjustToTerrain means the client bends the model to the slope of its tile when it is placed.
+// The rest is what interaction and pathfinding need: options are the 5 menu options (null =
+// none, "hidden" is already null), interactable says whether the client tests the model under
+// the mouse at all (Model.draw's bitset > 0), solid/blocksProjectiles go into the CollisionMap and
+// interactionSideFlags are the sides you can use it from (CollisionMap.reachedLoc).
 // Wall decorations (kinds 4-8) and ground decorations (22) aren't exported yet.
 // Pass every loc that should be in the index; the index only lists the locs of this run.
 //
@@ -102,10 +108,14 @@ public class ModelExport {
                 continue;
             }
 
-            String name = loc.name == null ? "" : loc.name.replace("\\", "\\\\").replace("\"", "\\\"");
-            sep(index).append("\n  \"").append(locId).append("\": { \"name\": \"").append(name)
-                .append("\", \"size\": [").append(loc.sizeX).append(", ").append(loc.sizeZ)
+            StringJoiner options = new StringJoiner(", ");
+            for (int op = 0; op < 5; op++) options.add(json(loc.options == null ? null : loc.options[op]));
+            sep(index).append("\n  \"").append(locId).append("\": { \"name\": ").append(json(loc.name == null ? "" : loc.name))
+                .append(", \"size\": [").append(loc.sizeX).append(", ").append(loc.sizeZ)
                 .append("], \"adjustToTerrain\": ").append(loc.adjustToTerrain)
+                .append(", \"options\": [").append(options).append("], \"interactable\": ").append(loc.interactable)
+                .append(", \"solid\": ").append(loc.solid).append(", \"blocksProjectiles\": ").append(loc.blocksProjectiles)
+                .append(", \"interactionSideFlags\": ").append(loc.interactionSideFlags)
                 .append(", \"models\": { ").append(files).append(" } }");
         }
         try (Writer out = new OutputStreamWriter(new FileOutputStream(outDir + "/index.json"), StandardCharsets.UTF_8)) {
@@ -587,6 +597,18 @@ public class ModelExport {
         sep(views).append("{\"buffer\":0,\"byteOffset\":").append(bin.size()).append(",\"byteLength\":").append(data.length).append('}');
         bin.write(data, 0, data.length);
         return counts[0]++;
+    }
+
+    /** A JSON string literal, or null. */
+    static String json(String value) {
+        if (value == null) return "null";
+        StringBuilder out = new StringBuilder("\"");
+        for (char c : value.toCharArray()) {
+            if (c == '"' || c == '\\') out.append('\\').append(c);
+            else if (c < 0x20) out.append(String.format("\\u%04x", (int) c));
+            else out.append(c);
+        }
+        return out.append('"').toString();
     }
 
     static StringBuilder sep(StringBuilder sb) {

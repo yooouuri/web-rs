@@ -14,6 +14,20 @@ export interface LocModelEntry {
   /** LocType.adjustToTerrain: the model is bent to the slope of the tile it is placed on */
   adjustToTerrain: boolean
   /**
+   * LocType.options: the 5 menu options, null where there is none. Game.handleLocOptions adds them
+   * with the actions LOC_OP_ACTION = [502, 900, 113, 872, 1062], plus "Examine" (1226); actions of
+   * 1000 and up sort below "Walk here" (516)
+   */
+  options: (string | null)[]
+  /** LocType.interactable: whether the model is tested under the mouse at all (Model.draw only picks bitsets > 0) */
+  interactable: boolean
+  /** LocType.solid: blocks walking (CollisionMap) */
+  solid: boolean
+  /** LocType.blocksProjectiles */
+  blocksProjectiles: boolean
+  /** LocType.interactionSideFlags: sides it can't be used from (CollisionMap.reachedLoc), 1 = north, 2 = east, 4 = south, 8 = west, rotated with the loc */
+  interactionSideFlags: number
+  /**
    * "<modelKind>_<variant>" -> file: the model LocType.getModel(modelKind, variant) builds,
    * rotated (variant 0..3) or mirrored and rotated (4..7) and lit like the client does
    */
